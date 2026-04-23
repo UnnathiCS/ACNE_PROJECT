@@ -408,6 +408,7 @@ export function ClinicalWorkspace() {
   }
 
   const resetCaseWorkspace = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
     dispatch({ type: 'RESET_CASE' })
     setStatus(null)
   }

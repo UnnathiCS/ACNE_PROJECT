@@ -351,7 +351,11 @@ def safe_unlink(path: Optional[str]) -> None:
     if not path:
         return
     try:
-        file_path = Path(path)
+        file_path = Path(path).resolve()
+        # Path containment: only delete files under managed directories
+        managed_roots = (UPLOAD_DIR.resolve(), OUTPUT_DIR.resolve(), REPORT_DIR.resolve())
+        if not any(file_path.is_relative_to(r) for r in managed_roots):
+            return
         if file_path.exists() and file_path.is_file():
             file_path.unlink()
     except OSError:
@@ -482,19 +486,14 @@ def consensus_summary(assignments: Dict[str, List[Dict[str, Any]]]) -> Dict[str,
     }
 
 
-def compact_session(session: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        'session_id': session['session_id'],
-        'profile_id': session.get('profile_id'),
-        'timestamp': session['timestamp'],
-        'severity': session.get('severity'),
-        'gags_score': session.get('gags_score'),
-        'lesion_count': session.get('lesion_count'),
-        'symmetry_delta': session.get('symmetry_delta'),
-        'privacy_mode': session.get('privacy_mode'),
-        'retention_hours': session.get('retention_hours'),
-        'status': session.get('status'),
-    }
+def _safe_json_loads(raw: Optional[str]) -> Optional[Any]:
+    """Parse a JSON string, returning None on failure instead of crashing."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def row_to_session(row: sqlite3.Row, status: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -506,7 +505,7 @@ def row_to_session(row: sqlite3.Row, status: Optional[Dict[str, Any]]) -> Dict[s
         'gags_score': row['gags_score'],
         'lesion_count': row['lesion_count'],
         'symmetry_delta': row['symmetry_delta'],
-        'results': json.loads(row['results_json']) if row['results_json'] else None,
+        'results': _safe_json_loads(row['results_json']),
         'note': row['note'] if 'note' in row.keys() else '',
         'diagnostic_image_path': row['diagnostic_image_path'],
         'original_image_path': row['original_image_path'],
@@ -766,14 +765,14 @@ class BridgeStore:
                 'SELECT status_json FROM statuses WHERE session_id = ?',
                 (session_id,),
             ).fetchone()
-        return json.loads(row['status_json']) if row else None
+        return _safe_json_loads(row['status_json']) if row else None
 
     def latest_status(self) -> Optional[Dict[str, Any]]:
         with self.lock:
             row = self.conn.execute(
                 'SELECT status_json FROM statuses ORDER BY updated_at DESC LIMIT 1'
             ).fetchone()
-        return json.loads(row['status_json']) if row else None
+        return _safe_json_loads(row['status_json']) if row else None
 
     def get_session_row(self, session_id: str) -> Optional[sqlite3.Row]:
         with self.lock:
@@ -825,8 +824,8 @@ class BridgeStore:
         clamped_limit = max(1, min(limit, 200))
         # Fetch one extra to detect whether a next page exists
         fetch_limit = clamped_limit + 1
-        conditions: list[str] = []
-        params: list[object] = []
+        conditions: List[str] = []
+        params: List[object] = []
 
         if profile_id:
             conditions.append('profile_id = ?')
@@ -843,7 +842,8 @@ class BridgeStore:
         )
         params.append(fetch_limit)
 
-        rows = self.conn.execute(query, params).fetchall()
+        with self.lock:
+            rows = self.conn.execute(query, params).fetchall()
         if not rows:
             return [], None
         # Determine whether there is a next page
@@ -916,7 +916,9 @@ class BridgeStore:
             return False
         safe_unlink(row['diagnostic_image_path'])
         safe_unlink(row['original_image_path'])
-        safe_unlink(str(REPORT_DIR / f'{session_id}_report.pdf'))
+        # Purge all preset variants of the report PDF
+        for report_file in REPORT_DIR.glob(f'{session_id}_*_report.pdf'):
+            safe_unlink(str(report_file))
         with self.lock:
             self.conn.execute('DELETE FROM statuses WHERE session_id = ?', (session_id,))
             self.conn.execute('DELETE FROM sessions WHERE session_id = ?', (session_id,))
@@ -948,7 +950,9 @@ class BridgeStore:
             for key in ('diagnostic_image_path', 'original_image_path'):
                 if row[key]:
                     live_paths.add(str(Path(row[key]).resolve()))
-            live_paths.add(str((REPORT_DIR / f"{row['session_id']}_report.pdf").resolve()))
+            # Track all preset variants of the report PDF
+            for report_file in REPORT_DIR.glob(f"{row['session_id']}_*_report.pdf"):
+                live_paths.add(str(report_file.resolve()))
         with self.lock:
             self.conn.execute('DELETE FROM statuses WHERE session_id NOT IN (SELECT session_id FROM sessions)')
             self.conn.commit()
@@ -1150,7 +1154,7 @@ def write_pdf_report(session: Dict[str, Any], compare: Optional[Dict[str, Any]],
         y = ensure_space(y)
         pdf.setFillColorRGB(*CLR_ACCENT)
         pdf.setFont('Helvetica', size)
-        pdf.drawString(left_margin + 4, y, '\xe2\x80\xa2')
+        pdf.drawString(left_margin + 4, y, '\u2022')
         for i, chunk in enumerate(wrap_text(text, 'Helvetica', size, content_width - 16)):
             if i > 0:
                 y = ensure_space(y)
@@ -1291,7 +1295,7 @@ def write_pdf_report(session: Dict[str, Any], compare: Optional[Dict[str, Any]],
     pdf.setStrokeColorRGB(*CLR_RULE)
     pdf.setLineWidth(1)
     sev_clr = severity_color(sev)
-    pdf.setFillColorRGB(sev_clr[0], sev_clr[1], sev_clr[2], 0.08)
+    pdf.setFillColorRGB(sev_clr[0], sev_clr[1], sev_clr[2])
     pdf.roundRect(left_margin, y - box_h + 6, content_width, box_h, 4, stroke=1, fill=1)
     pdf.setFont('Helvetica-Bold', 14)
     pdf.setFillColorRGB(*sev_clr)
@@ -1492,8 +1496,10 @@ async def _periodic_cleanup(app: FastAPI) -> None:
         try:
             await asyncio.sleep(300)
             app.state.resources['store'].cleanup_expired()
+        except asyncio.CancelledError:
+            break
         except Exception:
-            pass
+            logger.exception('Periodic cleanup failed')
 
 
 @asynccontextmanager
@@ -1534,7 +1540,7 @@ async def add_security_headers(request: Request, call_next) -> Response:
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-    response.headers['Content-Security-Policy'] = "default-src 'none'; frame-ancestors 'none'"
+    response.headers['Content-Security-Policy'] = "default-src 'none'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
     response.headers['Cache-Control'] = 'no-store'
     # Add HSTS only for non-localhost origins (production deployments)
@@ -1963,7 +1969,21 @@ async def analyze(
     retention_hours: int = Form(DEFAULT_RETENTION_HOURS),
 ) -> Dict[str, Any]:
     store = get_store()
-    payload = await file.read()
+    # Chunked read with early size cutoff to prevent DoS
+    chunks: list[bytes] = []
+    total_read = 0
+    while True:
+        chunk = await file.read(64 * 1024)  # 64KB chunks
+        if not chunk:
+            break
+        total_read += len(chunk)
+        if total_read > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f'File exceeds {MAX_UPLOAD_BYTES} byte limit',
+            )
+        chunks.append(chunk)
+    payload = b''.join(chunks)
     validate_upload(file, payload)
     image = decode_image(payload)
     h, w = image.shape[:2]
@@ -2110,18 +2130,13 @@ async def analyze(
             'symmetry_delta': session_data['symmetry_delta'],
             'results': session_data['results'],
             'compare': compare_data,
-            'original_image': bytes_to_data_uri(original_jpeg, 'image/jpeg'),
-            'diagnostic_image': bytes_to_data_uri(sync_result['diagnostic_jpeg'], 'image/jpeg'),
+            'original_image': '' if privacy_mode else bytes_to_data_uri(original_jpeg, 'image/jpeg'),
+            'diagnostic_image': '' if privacy_mode else bytes_to_data_uri(sync_result['diagnostic_jpeg'], 'image/jpeg'),
         }
     except HTTPException:
         store.set_status(session_id, 'failed', 'Analysis failed', 100, {'failed': True})
         raise
     except Exception as exc:
-        with open("error_debug.log", "a") as f:
-            import traceback
-            f.write(f"\n--- Error at {utcnow_iso()} ---\n")
-            f.write(f"Exc type: {type(exc)}\n")
-            f.write(f"Exc msg: {str(exc)}\n")
-            traceback.print_exc(file=f)
-        store.set_status(session_id, 'failed', str(exc), 100, {'failed': True})
+        logger.error('Analysis failed for session %s: %s', session_id, exc, exc_info=True)
+        store.set_status(session_id, 'failed', 'Internal analysis error', 100, {'failed': True})
         raise HTTPException(status_code=500, detail='Analysis failed') from exc

@@ -25,7 +25,7 @@ services:
   frontend:
     image: node:22-slim
     working_dir: /app
-    command: sh -c "npm install && npm run dev"
+    command: sh -c "npm install --prefer-offline && npm run dev"
     ports:
       - "3000:3000"
     volumes:

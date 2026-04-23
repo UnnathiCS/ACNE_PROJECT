@@ -102,6 +102,10 @@ class CloudInferenceEngine:
                     file_sizes[task_name] = upload_bytes
                 except Exception as e:
                     logger.error('[Cloud Engine] %s: %s', task_name, e)
+                    # Extract model_id from task_name (format: model_id_dim)
+                    parts = task_name.rsplit('_', 1)
+                    failed_model_id = parts[0] if len(parts) > 1 else task_name
+                    log_api_call(failed_model_id, 'error', error=str(e))
                     results[task_name] = []
 
         wall_ms = round((time.perf_counter() - wall_start) * 1000, 1)

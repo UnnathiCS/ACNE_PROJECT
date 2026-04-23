@@ -24,6 +24,7 @@ export function useStatusPoller(
     const abortController = new AbortController()
 
     const pollStatus = async () => {
+      let backoffMs = 1500
       while (!cancelled) {
         try {
           const nextStatus = await api.getStatus(sessionId, abortController.signal)
@@ -34,13 +35,16 @@ export function useStatusPoller(
           if (nextStatus.completed || nextStatus.failed) {
             return
           }
+          backoffMs = 1500 // reset on success
         } catch {
           if (cancelled) {
             return
           }
+          // Exponential backoff on error, capped at 15s
+          backoffMs = Math.min(backoffMs * 2, 15000)
         }
 
-        await new Promise((resolve) => window.setTimeout(resolve, 1500))
+        await new Promise((resolve) => window.setTimeout(resolve, backoffMs))
       }
     }
 

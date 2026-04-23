@@ -22,7 +22,7 @@ export default defineConfig(() => {
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes('framer-motion')) {
+            if (id.includes('node_modules/motion')) {
               return 'motion'
             }
             if (id.includes('lucide-react')) {

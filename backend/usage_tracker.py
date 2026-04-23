@@ -10,7 +10,7 @@ Phase 5 additions:
 """
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -67,7 +67,7 @@ def log_api_call(
         conn.execute(
             'INSERT INTO api_calls (timestamp, model, status, latency_ms, error) '
             'VALUES (?, ?, ?, ?, ?)',
-            (datetime.now().isoformat(), model_id, status, latency_ms, error),
+            (datetime.now(timezone.utc).isoformat(), model_id, status, latency_ms, error),
         )
         conn.commit()
 
