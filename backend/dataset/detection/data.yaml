@@ -1,0 +1,17 @@
+names:
+- blackhead
+- cyst
+- nodule
+- papule
+- pustule
+- whitehead
+nc: 6
+roboflow:
+  license: CC BY 4.0
+  project: acnedetection-xpxcu
+  url: https://universe.roboflow.com/project2-1vply/acnedetection-xpxcu/dataset/2
+  version: 2
+  workspace: project2-1vply
+test: ../test/images
+train: acnedetection-2/train/images
+val: acnedetection-2/valid/images

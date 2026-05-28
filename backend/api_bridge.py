@@ -2042,9 +2042,46 @@ async def analyze(
             if isinstance(v, list) and not k.startswith('_')
         }
         
+        # Optionally refine lesion types using EfficientViT classifier.
+        # This is non-blocking: failures fall back to original detector labels.
+        try:
+            from face_segmentation.efficientvit_classifier import classify_lesion_crop
+            refined_assignments = {}
+            for region, dets in clean_assignments.items():
+                refined_list = []
+                for d in dets:
+                    # keep original detector class
+                    detected_class = d.get('class_name')
+                    refined = None
+                    # Attempt to crop the lesion region and classify
+                    try:
+                        x1, y1, x2, y2 = d.get('bbox', [0, 0, 0, 0])
+                        x1, y1, x2, y2 = map(int, (x1, y1, x2, y2))
+                        crop = image[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
+                        if crop.size != 0:
+                            out = classify_lesion_crop(crop)
+                            if out:
+                                refined_label, conf = out
+                                # Map detector cyst/nodule -> nodulocystic when classifier returns nodulocystic
+                                refined = {
+                                    'refined_class': refined_label,
+                                    'refined_confidence': conf,
+                                }
+                    except Exception:
+                        refined = None
+                    entry = dict(d)
+                    if refined is not None:
+                        entry['refined'] = refined
+                    refined_list.append(entry)
+                refined_assignments[region] = refined_list
+            # replace clean_assignments for visualization with the refined version
+            viz_assignments = refined_assignments
+        except Exception:
+            viz_assignments = clean_assignments
+
         overlay = draw_lesion_boxes(
             image,
-            lesions=clean_assignments,
+            lesions=viz_assignments,
             clinical_report=clinical_report,
         )
         diagnostic_jpeg = image_to_jpeg_bytes(overlay)
