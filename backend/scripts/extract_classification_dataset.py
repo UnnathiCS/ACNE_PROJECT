@@ -41,13 +41,19 @@ OUTPUT_ROOT = "backend/datasets/classification"
 
 # =====================================================
 
+# Revised 5-class mapping:
+# 0: blackhead
+# 1: nodulocystic  (merge original 'cyst' and 'nodule')
+# 2: papule
+# 3: pustule
+# 4: whitehead
+
 CLASS_NAMES = {
-0: "blackhead",
-1: "cyst",
-2: "nodule",
-3: "papule",
-4: "pustule",
-5: "whitehead"
+    0: "blackhead",
+    1: "nodulocystic",
+    2: "papule",
+    3: "pustule",
+    4: "whitehead"
 }
 
 # =====================================================
@@ -159,7 +165,21 @@ split_name
 
             class_id = int(class_id_f)
 
-            if class_id not in CLASS_NAMES:
+            # Map original YOLO classes to the new 5-class taxonomy:
+            # original dataset assumed:
+            # 0: blackhead, 1: cyst, 2: nodule, 3: papule, 4: pustule, 5: whitehead
+            # Merge 1 (cyst) and 2 (nodule) -> 1 (nodulocystic)
+            if class_id == 0:
+                mapped_id = 0
+            elif class_id in (1, 2):
+                mapped_id = 1
+            elif class_id == 3:
+                mapped_id = 2
+            elif class_id == 4:
+                mapped_id = 3
+            elif class_id == 5:
+                mapped_id = 4
+            else:
                 stats['invalid_lines'] += 1
                 continue
 
@@ -201,7 +221,7 @@ split_name
                 stats['skipped_crop'] += 1
                 continue
 
-            class_name = CLASS_NAMES[class_id]
+            class_name = CLASS_NAMES[mapped_id]
 
             save_name = (
                 f"{img_name.rsplit('.',1)[0]}"
