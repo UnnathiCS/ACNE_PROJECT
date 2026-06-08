@@ -47,7 +47,7 @@ class RemapDataset(torch.utils.data.Dataset):
         return x, self.idx_map.get(y, y)
 
 
-def make_dataloaders(root_dir, img_size=224, batch_size=32, num_workers=4):
+def make_dataloaders(root_dir, img_size=224, batch_size=32, num_workers=4, sample_per_class=0):
     # support both singular `backend/dataset/classification` and
     # plural `backend/datasets/classification` paths
     if os.path.isdir(root_dir):
@@ -145,6 +145,26 @@ def make_dataloaders(root_dir, img_size=224, batch_size=32, num_workers=4):
     orig_idx_to_new_idx = {orig_idx: new_name_to_idx.get(name_to_new_name[orig_name], 0)
                            for orig_name, orig_idx in orig_name_to_idx.items()}
 
+    # Optional: sample up to `sample_per_class` images per NEW class from the training set
+    if sample_per_class and sample_per_class > 0:
+        import random
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for path, orig_idx in raw_train.samples:
+            new_idx = orig_idx_to_new_idx.get(orig_idx, 0)
+            grouped[new_idx].append((path, orig_idx))
+        selected = []
+        for cls in range(len(CLASS_NAMES)):
+            items = grouped.get(cls, [])
+            if len(items) > sample_per_class:
+                selected.extend(random.sample(items, sample_per_class))
+            else:
+                selected.extend(items)
+        # replace raw_train samples / imgs / targets (ImageFolder expects these fields)
+        raw_train.samples = selected
+        raw_train.imgs = selected
+        raw_train.targets = [orig_idx for _, orig_idx in selected]
+
     train_ds = RemapDataset(raw_train, orig_idx_to_new_idx)
     valid_ds = RemapDataset(raw_valid, orig_idx_to_new_idx)
     test_ds = RemapDataset(raw_test, orig_idx_to_new_idx)
@@ -232,26 +252,42 @@ def train(
     patience=5,
     num_workers=4,
     pretrained=True,
+    sample_per_class=0,
 ):
 
+    # Normalize device to torch.device
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device)
 
-    train_loader, valid_loader, test_loader, train_ds = make_dataloaders(data_root, img_size=img_size, batch_size=batch_size, num_workers=num_workers)
+    train_loader, valid_loader, test_loader, train_ds = make_dataloaders(
+        data_root,
+        img_size=img_size,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        sample_per_class=sample_per_class,
+    )
 
     model = build_model(len(CLASS_NAMES), model_name=model_name, pretrained=pretrained)
     model.to(device)
 
+    # Ensure weights dir exists
+    os.makedirs(os.path.dirname(weights_path), exist_ok=True)
 
+    # Checkpoint path
+    checkpoint_path = weights_path.replace(".pth", "_checkpoint.pth")
+    start_epoch = 1
+
+    # Prepare criterion with computed class weights
     class_weights = compute_class_weights(train_ds, device=device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-    # By default use phased schedule: head warmup then finetune
+    # Determine total epochs (phased schedule if not overridden)
     if epochs is None:
         total_epochs = int(head_epochs) + int(finetune_epochs)
     else:
         total_epochs = int(epochs)
 
-    # Freeze backbone and unfreeze classifier head for warmup
+    # Freeze/unfreeze helpers
     def freeze_backbone_and_unfreeze_head(m):
         for p in m.parameters():
             p.requires_grad = False
@@ -275,26 +311,55 @@ def train(
         for p in m.parameters():
             p.requires_grad = True
 
-    # Apply initial freeze
+    # Apply initial freeze for head warmup
     freeze_backbone_and_unfreeze_head(model)
 
-    # create optimizer only for params that require grad (head params)
+    # create optimizer only for params that require grad (head params initially)
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_epochs)
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.startswith("cuda")))
+    # mixed precision scaler (use CUDA availability)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
-    best_val_loss = float("inf")
+    # Training state
     best_metric = 0.0
     epochs_no_improve = 0
-
-    best_metric = 0.0
-    best_val_loss = float("inf")
-    epochs_no_improve = 0
-
     unfreeze_performed = False
 
-    for epoch in range(1, total_epochs + 1):
+    # If checkpoint exists, load model + optimizer + scheduler + scaler + epoch + best_metric
+    if os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        if "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+        elif "model_state" in checkpoint:
+            model.load_state_dict(checkpoint["model_state"])
+        try:
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            if "scaler_state_dict" in checkpoint and device.type == "cuda":
+                try:
+                    scaler.load_state_dict(checkpoint["scaler_state_dict"])
+                except Exception:
+                    pass
+        except Exception:
+            print("Warning: failed to fully restore optimizer/scheduler/scaler state from checkpoint.")
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        best_metric = float(checkpoint.get("best_metric", 0.0))
+        print(f"Resuming from epoch {start_epoch}")
+
+        # If training already finished, exit early to avoid silent no-op
+        if start_epoch > total_epochs:
+            print(
+                "Training already completed (checkpoint epoch >= total_epochs). "
+                "Delete the checkpoint to retrain from scratch."
+            )
+            return
+
+    # Main training loop
+    for epoch in range(start_epoch, total_epochs + 1):
         model.train()
         running_loss = 0.0
         all_preds = []
@@ -306,21 +371,29 @@ def train(
             targets = targets.to(device)
 
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=(device.startswith("cuda"))):
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                 outputs = model(images)
-                loss = criterion(outputs, targets)
+                # support models that may return (logits, feat_maps)
+                if isinstance(outputs, (tuple, list)):
+                    logits = outputs[0]
+                else:
+                    logits = outputs
+                loss = criterion(logits, targets)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
             running_loss += loss.item() * images.size(0)
-            _, preds = torch.max(outputs, 1)
+            _, preds = torch.max(logits, 1)
             all_preds.extend(preds.cpu().tolist())
             all_trues.extend(targets.cpu().tolist())
 
         # Step scheduler
-        scheduler.step()
+        try:
+            scheduler.step()
+        except Exception:
+            pass
 
         epoch_loss = running_loss / len(train_loader.dataset)
         train_acc = accuracy_score(all_trues, all_preds)
@@ -333,15 +406,32 @@ def train(
 
         print(f"Epoch {epoch}/{total_epochs} — train_loss={epoch_loss:.4f}, train_acc={train_acc:.4f}, val_acc={val_stats['accuracy']:.4f}, val_f1_mean={val_f1_mean:.4f}, time={(time.time()-t0):.1f}s")
 
-        # early stopping logic based on val_f1_mean
+        # early stopping logic based on val_f1_mean (update best_metric first)
         if val_f1_mean > best_metric:
             best_metric = val_f1_mean
             epochs_no_improve = 0
-            # save best
-            torch.save(model.state_dict(), weights_path)
-            print(f"Saved best model (val_f1_mean={best_metric:.4f}) to {weights_path}")
+            # save best model weights (state_dict only)
+            try:
+                torch.save(model.state_dict(), weights_path)
+                print(f"Saved best model (val_f1_mean={best_metric:.4f}) to {weights_path}")
+            except Exception as e:
+                print(f"Warning: failed to save best model: {e}")
         else:
             epochs_no_improve += 1
+
+        # Save checkpoint every epoch (with updated best_metric)
+        try:
+            ckpt = {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_metric": best_metric,
+                "scaler_state_dict": scaler.state_dict(),
+            }
+            torch.save(ckpt, checkpoint_path)
+        except Exception as e:
+            print(f"Warning: failed to save checkpoint: {e}")
 
         # If we have finished the head warmup, unfreeze for finetune
         if (not unfreeze_performed) and (epoch >= int(head_epochs)):
@@ -381,6 +471,7 @@ def parse_args():
     p.add_argument("--wd", type=float, default=1e-2)
     p.add_argument("--patience", type=int, default=5)
     p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--sample_per_class", type=int, default=0, help="If >0 sample up to this many images per class from the training set to create a small balanced subset")
     p.add_argument("--no_pretrained", dest="pretrained", action="store_false")
     p.set_defaults(pretrained=True)
     return p.parse_args()
@@ -411,4 +502,5 @@ if __name__ == "__main__":
         patience=args.patience,
         num_workers=args.num_workers,
         pretrained=args.pretrained,
+        sample_per_class=args.sample_per_class,
     )
