@@ -1,6 +1,7 @@
 import os
 import cv2
 from tqdm import tqdm
+import shutil
 
 # =====================================================
 
@@ -29,7 +30,7 @@ TEST_LABEL_DIR = os.path.join(YOLO_ROOT, "test", "labels")
 
 # Output classification dataset
 # NOTE: use 'datasets' (plural) to match training script expectations
-OUTPUT_ROOT = "backend/datasets/classification"
+OUTPUT_ROOT = "backend/dataset/classification"
 
 # =====================================================
 
@@ -249,6 +250,54 @@ split_name
     print(f"Summary for {split_name}: images={stats['images_total']}, missing_label={stats['missing_label']}, lines={stats['lines_total']}, invalid_lines={stats['invalid_lines']}, skipped_crop={stats['skipped_crop']}, saved={stats['saved']}, failed_writes={stats['failed_writes']}")
 
 
+# After extraction, consolidate any existing 'cyst'/'nodule' folders into 'nodulocystic'
+def consolidate_cyst_nodule(output_root=OUTPUT_ROOT, splits=("train","valid","test")):
+    moved_total = 0
+    for split in splits:
+        target_dir = os.path.join(output_root, split, "nodulocystic")
+        os.makedirs(target_dir, exist_ok=True)
+        for src_name in ("cyst", "nodule"):
+            src_dir = os.path.join(output_root, split, src_name)
+            if not os.path.isdir(src_dir):
+                continue
+            for fname in os.listdir(src_dir):
+                src_path = os.path.join(src_dir, fname)
+                if not os.path.isfile(src_path):
+                    continue
+                # only move image files
+                if not fname.lower().endswith(VALID_EXTENSIONS):
+                    continue
+                dest_path = os.path.join(target_dir, fname)
+                # avoid collisions
+                if os.path.exists(dest_path):
+                    base, ext = os.path.splitext(fname)
+                    i = 1
+                    while True:
+                        new_name = f"{base}_moved{i}{ext}"
+                        dest_path = os.path.join(target_dir, new_name)
+                        if not os.path.exists(dest_path):
+                            break
+                        i += 1
+                try:
+                    shutil.move(src_path, dest_path)
+                    moved_total += 1
+                except Exception:
+                    # best-effort: try copy then remove
+                    try:
+                        shutil.copy2(src_path, dest_path)
+                        os.remove(src_path)
+                        moved_total += 1
+                    except Exception:
+                        continue
+            # remove src_dir if empty
+            try:
+                if os.path.isdir(src_dir) and not os.listdir(src_dir):
+                    os.rmdir(src_dir)
+            except Exception:
+                pass
+    print(f"Consolidation complete: moved {moved_total} images into 'nodulocystic' folders.")
+
+
 # =====================================================
 
 # RUN
@@ -256,31 +305,28 @@ split_name
 # =====================================================
 
 process_split(
-TRAIN_IMG_DIR,
-TRAIN_LABEL_DIR,
-"train"
+    TRAIN_IMG_DIR,
+    TRAIN_LABEL_DIR,
+    "train"
 )
 
 # only run if folders exist
 
 if os.path.exists(VALID_IMG_DIR):
-
-
     process_split(
         VALID_IMG_DIR,
         VALID_LABEL_DIR,
         "valid"
     )
 
-
 if os.path.exists(TEST_IMG_DIR):
-
-
     process_split(
         TEST_IMG_DIR,
         TEST_LABEL_DIR,
         "test"
     )
 
+# consolidate any leftover cyst/nodule folders into nodulocystic
+consolidate_cyst_nodule(output_root=OUTPUT_ROOT, splits=("train","valid","test"))
 
 print("\n✅ Classification dataset generated successfully.")
