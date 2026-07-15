@@ -490,21 +490,21 @@ if __name__ == "__main__":
             print(f"Note: using alternate dataset path {alt}")
             data_root = alt
         train(
-        data_root=data_root,
-        weights_path=args.weights,
-        model_name=args.model,
-        img_size=args.img_size,
-        batch_size=args.batch_size,
+            data_root=data_root,
+            weights_path=args.weights,
+            model_name=args.model,
+            img_size=args.img_size,
+            batch_size=args.batch_size,
 
-        head_epochs=args.head_epochs,
-        finetune_epochs=args.finetune_epochs,
-        epochs=args.epochs,
+            head_epochs=args.head_epochs,
+            finetune_epochs=args.finetune_epochs,
+            epochs=args.epochs,
 
-        lr=args.lr,
-        weight_decay=args.wd,
-        device=device,
-        patience=args.patience,
-        num_workers=args.num_workers,
-        pretrained=args.pretrained,
-        sample_per_class=args.sample_per_class,
+            lr=args.lr,
+            weight_decay=args.wd,
+            device=device,
+            patience=args.patience,
+            num_workers=args.num_workers,
+            pretrained=args.pretrained,
+            sample_per_class=args.sample_per_class,
         )
