@@ -1,5 +1,11 @@
 import os
+import sys
 from typing import Tuple, Optional
+
+# Ensure backend root is importable when loaded via face_segmentation package.
+_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
 
 import cv2
 import numpy as np
@@ -30,11 +36,15 @@ def _load_model():
     if _model is not None:
         return _model
     try:
-        import timm
+        from models.efficientvit_acne import build_efficientvit_acne_classifier
     except Exception:
         return None
     try:
-        model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=len(CLASS_NAMES))
+        model = build_efficientvit_acne_classifier(
+            num_classes=len(CLASS_NAMES),
+            model_name=MODEL_NAME,
+            pretrained=False,
+        )
         if os.path.exists(MODEL_PATH):
             state = torch.load(MODEL_PATH, map_location=_device)
             model.load_state_dict(state)
@@ -59,7 +69,9 @@ def classify_lesion_crop(image_crop: np.ndarray) -> Optional[Tuple[str, float]]:
         img = cv2.cvtColor(image_crop, cv2.COLOR_BGR2RGB)
         x = _transform(img).unsqueeze(0).to(_device)
         with torch.no_grad():
-            logits = model(x)
+            outputs = model(x)
+            # Support (logits, feature_maps) tuples for Grad-CAM-compatible models.
+            logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
             probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
             idx = int(probs.argmax())
             return CLASS_NAMES[idx], float(probs[idx])

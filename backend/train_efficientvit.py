@@ -1,8 +1,14 @@
 import os
 import math
+import sys
 import time
 from argparse import ArgumentParser
 from collections import defaultdict
+
+# Allow running from project root or backend directory.
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
 
 import torch
 import torch.nn as nn
@@ -11,10 +17,10 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
-try:
-    import timm
-except Exception:
-    timm = None
+from models.efficientvit_acne import (
+    build_efficientvit_acne_classifier,
+    print_model_summary,
+)
 
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
@@ -177,10 +183,12 @@ def make_dataloaders(root_dir, img_size=224, batch_size=32, num_workers=4, sampl
 
 
 def build_model(num_classes, model_name="efficientvit_b0", pretrained=True):
-    if timm is None:
-        raise RuntimeError("timm is required for this script. Install with `pip install timm`.")
-
-    model = timm.create_model(model_name, pretrained=pretrained, num_classes=num_classes)
+    """Build multi-scale EfficientViT + CBAM classifier (pretrained backbone)."""
+    model = build_efficientvit_acne_classifier(
+        num_classes=num_classes,
+        model_name=model_name,
+        pretrained=pretrained,
+    )
     return model
 
 
@@ -269,6 +277,7 @@ def train(
 
     model = build_model(len(CLASS_NAMES), model_name=model_name, pretrained=pretrained)
     model.to(device)
+    print_model_summary(model, input_size=(1, 3, img_size, img_size))
 
     # Ensure weights dir exists
     os.makedirs(os.path.dirname(weights_path), exist_ok=True)
